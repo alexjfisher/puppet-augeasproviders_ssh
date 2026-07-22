@@ -227,6 +227,38 @@ describe provider_class do
       end
     end
 
+    it 'manages multiple entries in one transaction' do
+      apply!(
+        Puppet::Type.type(:sshkey).new(
+          name: 'foo.example.com',
+          type: 'ssh-rsa',
+          key: 'DEADMEAT',
+          target: target,
+          provider: 'augeas',
+        ),
+        Puppet::Type.type(:sshkey).new(
+          name: 'new.example.com',
+          type: 'ssh-rsa',
+          key: 'FEEDFACE',
+          target: target,
+          provider: 'augeas',
+        ),
+        Puppet::Type.type(:sshkey).new(
+          name: 'bar.example.com',
+          ensure: 'absent',
+          host_aliases: ['qux'],
+          target: target,
+          provider: 'augeas',
+        ),
+      )
+
+      aug_open(target, 'Known_Hosts.lns') do |aug|
+        expect(aug.match('./*[label()!="#comment"]').size).to eq(2)
+        expect(aug.get("./*[.='foo.example.com']/key")).to eq('DEADMEAT')
+        expect(aug.get("./*[.='new.example.com']/key")).to eq('FEEDFACE')
+      end
+    end
+
     it 'removes hashed entry with aliases' do
       apply!(Puppet::Type.type(:sshkey).new(
                name: 'bar.example.com',
@@ -238,6 +270,36 @@ describe provider_class do
 
       aug_open(target, 'Known_Hosts.lns') do |aug|
         aug.match('./*[label()!="#comment"]').size.should eq(1)
+      end
+    end
+  end
+
+  context 'with malformed hashed entries' do
+    let(:tmptarget) { aug_fixture('malformed') }
+    let(:target) { tmptarget.path }
+
+    it 'indexes only well-formed version-1 hashed entries' do
+      aug_open(target, 'Known_Hosts.lns') do |aug|
+        aug.defvar('target', "/files#{target}")
+        index = provider_class.build_entry_index(aug)
+        expect(index[:clear].keys).to eq(['foo.example.com'])
+        expect(index[:hashed].size).to eq(1)
+      end
+    end
+
+    it 'manages valid entries and leaves malformed ones alone' do
+      apply!(Puppet::Type.type(:sshkey).new(
+               name: 'foo.example.com',
+               type: 'ssh-rsa',
+               key: 'DEADMEAT',
+               target: target,
+               provider: 'augeas',
+             ))
+
+      aug_open(target, 'Known_Hosts.lns') do |aug|
+        expect(aug.match('./*[label()!="#comment"]').size).to eq(6)
+        expect(aug.get("./*[.='foo.example.com']/key")).to eq('DEADMEAT')
+        expect(aug.get("./*[.='|1|dHJ1bmNhdGVk']/key")).to eq('TRUNCATEDKEY')
       end
     end
   end

@@ -66,7 +66,7 @@ Puppet::Type.type(:sshkey).provide(:augeas, parent: Puppet::Type.type(:augeaspro
       aug.match('$target/*[label()!="#comment"]').each do |spath|
         name = aug.get(spath)
         # We only list non-hashed entries
-        next if name.start_with? '|1|'
+        next if hashed?(name)
 
         aliases = aug.match("#{spath}/alias").map { |apath| aug.get(apath) }
         resources << new(ensure: :present,
@@ -92,21 +92,95 @@ Puppet::Type.type(:sshkey).provide(:augeas, parent: Puppet::Type.type(:augeaspro
     aug.defvar('resource', path)
   end
 
-  def self.find_resource(aug, hostname)
-    aug.match('$target/*[label()!="#comment"]').each do |entry|
+  # Index of the entries of the current target file, memoized so that
+  # find_resource doesn't rescan every entry on each lookup. Must be expired
+  # (see expire_entry_index) whenever entries are added, removed or renamed,
+  # and when the tree is saved: saving reloads it, renumbering entry paths.
+  def self.entry_index(aug)
+    @entry_index ||= {}
+    @entry_index[aug.get('/augeas/context')] ||= build_entry_index(aug)
+  end
+
+  def self.build_entry_index(aug)
+    index = { clear: {}, hashed: [], resolved: {} }
+    aug.match('$target/*[label()!="#comment"]').each_with_index do |entry, position|
       hostnames = aug.get(entry)
+      next if hostnames.nil?
 
-      # Clear value
-      return entry if hostnames.split(',')[0] == hostname
+      if hashed?(hostnames)
+        salt, hostname_digest = decode_hashed_hostname(hostnames)
+        next if salt.nil?
 
-      next unless hashed?(hostnames)
-
-      require 'base64'
-      _dummy, _one, salt64, hostname64 = hostnames.split[0].split('|')
-      salt = Base64.decode64(salt64)
-      return entry if hostname64 == Base64.encode64(OpenSSL::HMAC.digest('sha1', salt, hostname)).strip
+        index[:hashed] << [position, entry, salt, hostname_digest]
+      else
+        # Only the first occurrence of a hostname can match
+        index[:clear][hostnames.split(',')[0]] ||= [position, entry]
+      end
     end
+    index
+  end
+
+  # A hashed hostname is |1|base64(salt)|base64(HMAC-SHA1(salt, hostname)).
+  # Return nil for anything else - unknown versions, truncated entries,
+  # invalid Base64, digests that cannot be an HMAC-SHA1 - so the entry is
+  # left alone instead of misinterpreted
+  def self.decode_hashed_hostname(hostnames)
+    require 'base64'
+    fields = hostnames.split[0].split('|')
+    return nil unless fields.length == 4 && fields[0] == '' && fields[1] == '1'
+
+    salt = Base64.strict_decode64(fields[2])
+    digest = Base64.strict_decode64(fields[3])
+    return nil unless digest.bytesize == 20
+
+    [salt, digest]
+  rescue ArgumentError
     nil
+  end
+
+  def self.expire_entry_index
+    @entry_index = nil
+  end
+
+  # Instance-side helper for the mutating methods below. Always clears
+  # every target's index, unlike the class method's optional path argument;
+  # the plural name marks that wider effect.
+  def expire_entry_indexes
+    self.class.expire_entry_index
+  end
+
+  # Resolutions are memoized because matching a hostname against hashed
+  # entries costs an HMAC per entry, and each managed hostname is looked
+  # up several times per run
+  def self.find_resource(aug, hostname)
+    index = entry_index(aug)
+    return index[:resolved][hostname] if index[:resolved].key?(hostname)
+
+    index[:resolved][hostname] = first_matching_entry(index, hostname)
+  end
+
+  # The first entry in file order that matches the hostname wins, whether
+  # clear or hashed, just as when scanning the file entry by entry
+  def self.first_matching_entry(index, hostname)
+    clear_position, clear_entry = index[:clear][hostname]
+
+    index[:hashed].each do |position, entry, salt, hostname_digest|
+      break if clear_position && position > clear_position
+      return entry if hostname_digest == OpenSSL::HMAC.digest('sha1', salt, hostname)
+    end
+    clear_entry
+  end
+
+  # Saving reloads the tree, which renumbers the entry paths
+  def flush
+    expire_entry_indexes
+    super
+  end
+
+  # The shared Augeas handle is closed after each Puppet run
+  def self.post_resource_eval
+    expire_entry_index
+    super
   end
 
   def self.hashed?(string)
@@ -144,6 +218,7 @@ Puppet::Type.type(:sshkey).provide(:augeas, parent: Puppet::Type.type(:augeaspro
         aug.set('$resource/alias[last()+1]', a)
       end
     end
+    expire_entry_indexes
 
     set_value(aug, 'type', type)
     set_value(aug, 'key', key)
@@ -169,12 +244,14 @@ Puppet::Type.type(:sshkey).provide(:augeas, parent: Puppet::Type.type(:augeaspro
         end
       end
       aug.rm('$resource')
+      expire_entry_indexes
     end
   end
 
   def force_hash
     augopen! do |aug|
       aug.set('$resource', self.class.new_hash(resource[:name]))
+      expire_entry_indexes
 
       # Get existing values
       type = aug.get('$resource/type')
