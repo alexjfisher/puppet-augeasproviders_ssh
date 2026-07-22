@@ -5,6 +5,12 @@ require 'spec_helper'
 provider_class = Puppet::Type.type(:sshkey).provider(:augeas)
 
 describe provider_class do
+  def hashed_entry_matches?(entry_value, hostname)
+    require 'base64'
+    _empty, _version, salt64, hash64 = entry_value.split('|')
+    Base64.decode64(hash64) == OpenSSL::HMAC.digest('sha1', Base64.decode64(salt64), hostname)
+  end
+
   context 'with empty file' do
     let(:tmptarget) { aug_fixture('empty') }
     let(:target) { tmptarget.path }
@@ -203,6 +209,8 @@ describe provider_class do
         aug.get('./4').should =~ %r{^\|1\|}
         aug.get('./4/type').should eq('ssh-rsa')
         aug.get('./4/key').should =~ %r{^AAAAB3NzaC1yc2}
+        expect(hashed_entry_matches?(aug.get('./2'), 'foo.example.com')).to be true
+        expect(hashed_entry_matches?(aug.get('./4'), 'foo')).to be true
       end
     end
 
