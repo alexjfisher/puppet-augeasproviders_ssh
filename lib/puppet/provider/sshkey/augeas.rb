@@ -81,6 +81,68 @@ Puppet::Type.type(:sshkey).provide(:augeas, parent: Puppet::Type.type(:augeaspro
     end
   end
 
+  # Read the state of all managed entries in one pass per target file, so
+  # that reading each property doesn't have to reopen Augeas and locate the
+  # entry again. The property getters fall back to live Augeas lookups when
+  # prefetch hasn't run.
+  def self.prefetch(resources)
+    resources.values.group_by { |resource| target(resource) }.each_value do |group|
+      augopen(group.first) do |aug|
+        group.each do |resource|
+          entry = find_resource(aug, resource[:name])
+          resource.provider = if entry.nil?
+                                new(ensure: :absent)
+                              elsif hashed?(aug.get(entry))
+                                prefetched_hashed(aug, resource)
+                              else
+                                prefetched_clear(aug, resource, entry)
+                              end
+        end
+      end
+    rescue Puppet::Error
+      # The file failed to load; leave the resources unprefetched so the
+      # error is reported per resource, as it is without prefetching
+      nil
+    end
+  end
+
+  def self.prefetched_clear(aug, resource, entry)
+    new(ensure: :present,
+        name: resource[:name],
+        type: aug.get("#{entry}/type"),
+        key: aug.get("#{entry}/key"),
+        host_aliases: aug.match("#{entry}/alias").map { |apath| aug.get(apath) },
+        hashed: false,
+        target: target(resource))
+  end
+
+  def self.prefetched_hashed(aug, resource)
+    # joined_value keeps prefetch reporting exactly what the live getters
+    # would, so prefetching only changes performance, not decisions
+    type, key = %w[type key].map { |label| joined_value(aug, resource, label) }
+    new(ensure: :present,
+        name: resource[:name],
+        type: type,
+        key: key,
+        host_aliases: (resource[:host_aliases] || []).select { |a| find_resource(aug, a) },
+        hashed: true,
+        target: target(resource))
+  end
+
+  # A hashed resource is backed by one file entry per hostname (the hashed
+  # format allows only one hostname per entry), each duplicating type and
+  # key. Report the value shared by all of the entries: if any entry
+  # disagrees or is missing, the AND-joined string cannot match the catalog
+  # value. For key, a property, the failed insync? comparison then makes the
+  # setter re-sync every entry. (type is a namevar parameter in sshkeys_core,
+  # so its joined value is only ever reported, never synced.) Shared by the
+  # live getter and prefetch so the two cannot drift.
+  def self.joined_value(aug, resource, label)
+    [resource[:name], resource[:host_aliases]].flatten.compact.map do |h|
+      aug.get("#{find_resource(aug, h)}/#{label}")
+    end.uniq.join(' AND ')
+  end
+
   # Override self.setvars to set $resource
   def self.setvars(aug, resource = nil)
     aug.set('/augeas/context', "/files#{target(resource)}")
@@ -192,9 +254,17 @@ Puppet::Type.type(:sshkey).provide(:augeas, parent: Puppet::Type.type(:augeaspro
   end
 
   def hashed?
+    return @property_hash[:hashed] if @property_hash.key?(:hashed)
+
     augopen do |aug|
       resource_hashed?(aug)
     end
+  end
+
+  def exists?
+    return @property_hash[:ensure] == :present if @property_hash.key?(:ensure)
+
+    super
   end
 
   def self.new_hash(hostname)
@@ -268,6 +338,8 @@ Puppet::Type.type(:sshkey).provide(:augeas, parent: Puppet::Type.type(:augeaspro
   end
 
   def host_aliases
+    return @property_hash[:host_aliases] if @property_hash.key?(:host_aliases)
+
     augopen do |aug|
       if resource_hashed?(aug)
         # We cannot know about unmanaged aliases when hashed
@@ -298,10 +370,7 @@ Puppet::Type.type(:sshkey).provide(:augeas, parent: Puppet::Type.type(:augeaspro
 
   def get_value(aug, label)
     if resource_hashed?(aug)
-      # Use AND to make convergence fail if aliases are not in sync
-      [resource[:name], resource[:host_aliases]].flatten.compact.map do |h|
-        aug.get("#{self.class.find_resource(aug, h)}/#{label}")
-      end.uniq.join(' AND ')
+      self.class.joined_value(aug, resource, label)
     else
       aug.get("$resource/#{label}")
     end
@@ -320,6 +389,8 @@ Puppet::Type.type(:sshkey).provide(:augeas, parent: Puppet::Type.type(:augeaspro
   end
 
   def type
+    return @property_hash[:type] if @property_hash.key?(:type)
+
     augopen do |aug|
       get_value(aug, 'type')
     end
@@ -332,6 +403,8 @@ Puppet::Type.type(:sshkey).provide(:augeas, parent: Puppet::Type.type(:augeaspro
   end
 
   def key
+    return @property_hash[:key] if @property_hash.key?(:key)
+
     augopen do |aug|
       get_value(aug, 'key')
     end
