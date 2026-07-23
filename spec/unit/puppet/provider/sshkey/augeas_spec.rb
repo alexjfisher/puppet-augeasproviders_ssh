@@ -304,6 +304,143 @@ describe provider_class do
     end
   end
 
+  describe '.reload_file' do
+    around do |example|
+      saved = provider_class.instance_variable_get(:@aug_handler)
+      example.run
+      provider_class.instance_variable_set(:@aug_handler, saved)
+      provider_class.instance_variable_set(:@aug, nil)
+    end
+
+    def handle_with(path, configured:)
+      aug = instance_double(Augeas)
+      allow(aug).to receive(:match).with("/augeas/load/Known_Hosts/incl[.='#{path}']")
+                                   .and_return(configured ? ['/augeas/load/Known_Hosts/incl'] : [])
+      aug
+    end
+
+    it 'reloads a file configured in the handle' do
+      aug = handle_with('/tmp/foo', configured: true)
+      provider_class.instance_variable_set(:@aug_handler, aug)
+      allow(aug).to receive(:rm)
+      allow(aug).to receive(:load!)
+
+      provider_class.reload_file('/tmp/foo')
+
+      expect(aug).to have_received(:rm).with('/files/tmp/foo')
+      expect(aug).to have_received(:load!)
+    end
+
+    it 'leaves unconfigured files alone' do
+      aug = handle_with('/tmp/foo', configured: false)
+      provider_class.instance_variable_set(:@aug_handler, aug)
+      provider_class.reload_file('/tmp/foo')
+    end
+
+    it 'does nothing when no handle is open' do
+      provider_class.instance_variable_set(:@aug_handler, nil)
+      expect { provider_class.reload_file('/tmp/foo') }.not_to raise_error
+    end
+
+    it 'fails when an old augeasproviders_core has the file configured' do
+      provider_class.instance_variable_set(:@aug_handler, nil)
+      provider_class.instance_variable_set(:@aug, handle_with('/tmp/foo', configured: true))
+      expect { provider_class.reload_file('/tmp/foo') }.to raise_error(Puppet::Error, %r{augeasproviders_core})
+    end
+
+    it 'ignores an old-core handle without the file' do
+      provider_class.instance_variable_set(:@aug_handler, nil)
+      provider_class.instance_variable_set(:@aug, handle_with('/tmp/foo', configured: false))
+      expect { provider_class.reload_file('/tmp/foo') }.not_to raise_error
+    end
+  end
+
+  context 'when sharing a file with the parsed provider' do
+    let(:tmptarget) { aug_fixture('empty') }
+    let(:target) { tmptarget.path }
+
+    before do
+      # The spec harness has no filebucket to back the file up to
+      allow(Puppet::Type.type(:sshkey).provider(:parsed)).to receive(:backup_target)
+    end
+
+    it 'preserves entries the parsed provider writes mid-run' do
+      apply!(
+        Puppet::Type.type(:sshkey).new(
+          name: 'a1.example.com',
+          type: 'ssh-rsa',
+          key: 'AAAA_A1',
+          target: target,
+          provider: 'augeas',
+        ),
+        Puppet::Type.type(:sshkey).new(
+          name: 'p1.example.com',
+          type: 'ssh-rsa',
+          key: 'AAAA_P1',
+          target: target,
+          provider: 'parsed',
+        ),
+        Puppet::Type.type(:sshkey).new(
+          name: 'a2.example.com',
+          type: 'ssh-rsa',
+          key: 'AAAA_A2',
+          target: target,
+          provider: 'augeas',
+        ),
+      )
+
+      aug_open(target, 'Known_Hosts.lns') do |aug|
+        expect(aug.match('./*[label()!="#comment"]').size).to eq(3)
+        expect(aug.get("./*[.='p1.example.com']/key")).to eq('AAAA_P1')
+        expect(aug.get("./*[.='a2.example.com']/key")).to eq('AAAA_A2')
+      end
+    end
+  end
+
+  context 'with a file the parsed provider repairs mid-run' do
+    # The fixture has an OpenSSH-legal trailing comment the lens rejects,
+    # so the augeas provider cannot load it until the parsed provider
+    # rewrites the entry
+    let(:tmptarget) { aug_fixture('fixable') }
+    let(:target) { tmptarget.path }
+
+    before do
+      # The spec harness has no filebucket to back the file up to
+      allow(Puppet::Type.type(:sshkey).provider(:parsed)).to receive(:backup_target)
+    end
+
+    it 'reloads and manages the file once it parses again' do
+      apply(
+        Puppet::Type.type(:sshkey).new(
+          name: 'probe.example.com',
+          ensure: 'absent',
+          type: 'ssh-rsa',
+          target: target,
+          provider: 'augeas',
+        ),
+        Puppet::Type.type(:sshkey).new(
+          name: 'fixme.example.com',
+          type: 'ssh-rsa',
+          key: 'NEWKEY',
+          target: target,
+          provider: 'parsed',
+        ),
+        Puppet::Type.type(:sshkey).new(
+          name: 'after.example.com',
+          type: 'ssh-rsa',
+          key: 'AFTERKEY',
+          target: target,
+          provider: 'augeas',
+        ),
+      )
+
+      aug_open(target, 'Known_Hosts.lns') do |aug|
+        expect(aug.get("./*[.='fixme.example.com']/key")).to eq('NEWKEY')
+        expect(aug.get("./*[.='after.example.com']/key")).to eq('AFTERKEY')
+      end
+    end
+  end
+
   context 'with broken file' do
     let(:tmptarget) { aug_fixture('broken') }
     let(:target) { tmptarget.path }

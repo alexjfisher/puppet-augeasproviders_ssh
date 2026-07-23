@@ -200,8 +200,14 @@ Puppet::Type.type(:sshkey).provide(:augeas, parent: Puppet::Type.type(:augeaspro
     nil
   end
 
-  def self.expire_entry_index
-    @entry_index = nil
+  # With a path, only that file's entries are forgotten; without one,
+  # everything is
+  def self.expire_entry_index(path = nil)
+    if path
+      @entry_index&.delete("/files#{path}")
+    else
+      @entry_index = nil
+    end
   end
 
   # Instance-side helper for the mutating methods below. Always clears
@@ -237,6 +243,47 @@ Puppet::Type.type(:sshkey).provide(:augeas, parent: Puppet::Type.type(:augeaspro
   def flush
     expire_entry_indexes
     super
+  end
+
+  # Is the file configured in the handle's transform? That is the test for
+  # "this provider has state about the file": a file that failed to parse
+  # is configured but has no tree, and must still be reloaded once another
+  # writer has rewritten it.
+  def self.transform_includes?(aug, path)
+    lens_name = lens[%r{[^.]+}]
+    !aug.match("/augeas/load/#{lens_name}/incl[.='#{path}']").empty?
+  end
+
+  # Discard everything known about a file another writer has rewritten:
+  # saving the stale loaded tree would clobber that writer's changes, and
+  # cached load errors would outlive the rewrite. @aug_handler is the
+  # shared handle augeasproviders_core 4.x caches on this class; when it
+  # isn't open, or the file isn't configured in it, there is no stale
+  # state and the next augopen reads the file fresh.
+  def self.reload_file(path)
+    if @aug_handler.nil?
+      # Before 4.0.0, augeasproviders_core cached the handle as @aug, which
+      # this method cannot reload. metadata.json requires 4.0.0, but if an
+      # older version is used anyway, fail loudly - only for a file the old
+      # handle actually has - so the unsupported combination surfaces here
+      # instead of as a later save silently discarding the other writer's
+      # changes.
+      raise(Puppet::Error, "augeasproviders_core >= 4.0.0 is required to reload #{path} after another provider has written it") if !@aug.nil? && transform_includes?(@aug, path)
+
+      expire_entry_index(path)
+      return
+    end
+    unless transform_includes?(@aug_handler, path)
+      expire_entry_index(path)
+      return
+    end
+
+    expire_entry_index
+    # Removing the tree first forces the re-parse: load! alone skips files
+    # whose recorded mtime looks unchanged, and mtimes have one-second
+    # granularity
+    @aug_handler.rm("/files#{path}")
+    @aug_handler.load!
   end
 
   # The shared Augeas handle is closed after each Puppet run
@@ -415,4 +462,26 @@ Puppet::Type.type(:sshkey).provide(:augeas, parent: Puppet::Type.type(:augeaspro
       set_value(aug, 'key', value)
     end
   end
+end
+
+# Both sshkey providers can manage entries in the same file. The parsed
+# provider rewrites the whole file on flush, so any tree the augeas provider
+# has loaded for that file goes stale, and saving it would silently discard
+# the entries the parsed provider just wrote.
+module AugeasprovidersSsh
+  # Makes the augeas sshkey provider reload its view of a file after the
+  # parsed provider (a ParsedFile provider) has rewritten it
+  module SshkeyParsedFlushHook
+    def flush_target(target)
+      result = super
+      Puppet::Type.type(:sshkey).provider(:augeas).reload_file(target)
+      result
+    end
+  end
+end
+
+sshkey_parsed = Puppet::Type.type(:sshkey).provider(:parsed)
+if sshkey_parsed
+  singleton = sshkey_parsed.singleton_class
+  singleton.prepend(AugeasprovidersSsh::SshkeyParsedFlushHook) unless singleton.include?(AugeasprovidersSsh::SshkeyParsedFlushHook)
 end

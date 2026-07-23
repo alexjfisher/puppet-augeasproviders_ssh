@@ -280,6 +280,56 @@ describe 'sshkey provider' do
         end
       end
 
+      # A parsed-provider write between two augeas-provider writes to the
+      # same file: the augeas provider must reload the file rather than
+      # save its stale tree over the parsed provider's entry
+      context 'with a parsed write between augeas writes to one file' do
+        let(:target) { '/etc/ssh/acceptance_known_hosts_interleaved' }
+
+        # The requires pin the augeas-parsed-augeas evaluation order the test
+        # depends on. sshkey has a composite namevar, so resource references
+        # must use the name@type form.
+        let(:manifest) do
+          <<-EOM
+            sshkey { 'interleaved-a1.example.com':
+              ensure   => present,
+              type     => 'ssh-rsa',
+              key      => 'AAAA_A1',
+              target   => '#{target}',
+              provider => 'augeas',
+            }
+            sshkey { 'interleaved-p1.example.com':
+              ensure   => present,
+              type     => 'ssh-rsa',
+              key      => 'AAAA_P1',
+              target   => '#{target}',
+              provider => 'parsed',
+              require  => Sshkey['interleaved-a1.example.com@ssh-rsa'],
+            }
+            sshkey { 'interleaved-a2.example.com':
+              ensure   => present,
+              type     => 'ssh-rsa',
+              key      => 'AAAA_A2',
+              target   => '#{target}',
+              provider => 'augeas',
+              require  => Sshkey['interleaved-p1.example.com@ssh-rsa'],
+            }
+          EOM
+        end
+
+        it 'keeps the entries of both providers' do
+          on host, "rm -f #{target}"
+          apply_manifest_on(host, manifest, catch_failures: true)
+          on host, "grep '^interleaved-a1.example.com ' #{target}"
+          on host, "grep '^interleaved-p1.example.com ' #{target}"
+          on host, "grep '^interleaved-a2.example.com ' #{target}"
+        end
+
+        it 'is idempotent' do
+          apply_manifest_on(host, manifest, catch_changes: true)
+        end
+      end
+
       # Timings are reported, not asserted: sshkey catalogs of this size have
       # been unusably slow (issue #106), and these numbers make the provider's
       # performance visible in the test output on every run
