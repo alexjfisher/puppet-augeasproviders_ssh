@@ -259,6 +259,50 @@ describe provider_class do
       end
     end
 
+    it 'does not write through unresolved alias paths' do
+      res = Puppet::Type.type(:sshkey).new(
+        name: 'bar.example.com',
+        type: 'ssh-rsa',
+        key: 'NEWKEY',
+        host_aliases: %w[qux brandnew],
+        target: target,
+        provider: 'augeas',
+      )
+
+      res.provider.augopen do |aug|
+        res.provider.set_value(aug, 'key', 'NEWKEY')
+        expect(aug.get('/key')).to be_nil
+        expect(aug.get("#{provider_class.find_resource(aug, 'qux')}/key")).to eq('NEWKEY')
+      end
+    end
+
+    it 'removes a hashed entry with no aliases in the resource' do
+      apply!(Puppet::Type.type(:sshkey).new(
+               name: 'bar.example.com',
+               ensure: 'absent',
+               target: target,
+               provider: 'augeas',
+             ))
+
+      aug_open(target, 'Known_Hosts.lns') do |aug|
+        expect(aug.match('./*[label()!="#comment"]').size).to eq(2)
+      end
+    end
+
+    it 'removes a hashed entry when a listed alias has no backing entry' do
+      apply!(Puppet::Type.type(:sshkey).new(
+               name: 'bar.example.com',
+               ensure: 'absent',
+               host_aliases: %w[qux brandnew],
+               target: target,
+               provider: 'augeas',
+             ))
+
+      aug_open(target, 'Known_Hosts.lns') do |aug|
+        expect(aug.match('./*[label()!="#comment"]').size).to eq(1)
+      end
+    end
+
     it 'removes hashed entry with aliases' do
       apply!(Puppet::Type.type(:sshkey).new(
                name: 'bar.example.com',

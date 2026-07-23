@@ -139,7 +139,8 @@ Puppet::Type.type(:sshkey).provide(:augeas, parent: Puppet::Type.type(:augeaspro
   # live getter and prefetch so the two cannot drift.
   def self.joined_value(aug, resource, label)
     [resource[:name], resource[:host_aliases]].flatten.compact.map do |h|
-      aug.get("#{find_resource(aug, h)}/#{label}")
+      entry = find_resource(aug, h)
+      entry && aug.get("#{entry}/#{label}")
     end.uniq.join(' AND ')
   end
 
@@ -356,8 +357,9 @@ Puppet::Type.type(:sshkey).provide(:augeas, parent: Puppet::Type.type(:augeaspro
   def destroy
     augopen! do |aug|
       if resource_hashed?(aug)
-        resource[:host_aliases].each do |a|
-          aug.rm(self.class.find_resource(aug, a))
+        (resource[:host_aliases] || []).each do |a|
+          entry = self.class.find_resource(aug, a)
+          aug.rm(entry) if entry
         end
       end
       aug.rm('$resource')
@@ -431,7 +433,12 @@ Puppet::Type.type(:sshkey).provide(:augeas, parent: Puppet::Type.type(:augeaspro
     return unless resource_hashed?(aug) && resource[:host_aliases]
 
     resource[:host_aliases].each do |h|
-      aug.set("#{self.class.find_resource(aug, h)}/#{label}", value.to_s)
+      alias_entry = self.class.find_resource(aug, h)
+      # An alias without a backing entry is created by host_aliases= with
+      # the right values; writing through a nil path would hit the tree root
+      next if alias_entry.nil?
+
+      aug.set("#{alias_entry}/#{label}", value.to_s)
     end
   end
 
