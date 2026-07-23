@@ -49,12 +49,40 @@ end
 raise('Missing augeasproviders_core dependency') if Puppet::Type.type(:augeasprovider).nil?
 
 Puppet::Type.type(:sshkey).provide(:augeas, parent: Puppet::Type.type(:augeasprovider).provider(:default)) do
-  desc 'Uses Augeas API to update SSH known_hosts entries'
+  desc "Uses Augeas API to update SSH known_hosts entries.
+
+    Known limitations:
+
+    * Entries are matched by hostname alone, but the sshkey type identifies
+      resources by hostname AND key type. A host with entries for more than
+      one key algorithm cannot be managed by this provider: every resource
+      for that hostname resolves to its first entry in the file. (The
+      parsed provider handles multiple algorithms per host correctly.)
+    * @cert-authority and @revoked markers are ignored when matching. A
+      marked line is not an ordinary host key: @revoked blacklists the key
+      for its hosts, and @cert-authority trusts it as a certificate
+      authority for a (usually wildcard) host pattern. This provider
+      matches such lines as if they were plain host keys, so it can report
+      a revoked key as in sync, or update the key of a marked line while
+      leaving the marker - and its very different meaning - in place.
+    * A single line the Known_Hosts lens cannot parse makes the whole file
+      unloadable, so every sshkey resource for that target fails until the
+      line is fixed. OpenSSH accepts some content the lens does not (for
+      example a trailing comment that is not introduced by '#', such as the
+      user@host suffix on a line copied from a .pub file), so a hand-edited
+      or tool-generated known_hosts file can trip this. The parsed provider
+      never fails the whole file - it parses every line into a record,
+      however mangled, and preserves it."
 
   has_features :hashed_hostnames
 
   default_file { '/etc/ssh/ssh_known_hosts' }
 
+  # The whole-file failure noted above is a lens limitation: the fix is to
+  # relax Known_Hosts.lns to accept the content OpenSSH does. This module
+  # already ships lib/augeas/lenses/known_hosts.aug (currently a copy of the
+  # stock lens); a follow-up could patch it and give it a unique module name
+  # so it is loaded unambiguously instead of shadowing the distribution lens.
   lens { 'Known_Hosts.lns' }
 
   confine feature: :augeas
