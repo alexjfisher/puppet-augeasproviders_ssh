@@ -5,13 +5,15 @@
 # Copyright (c) 2015-2020 Raphaël Pinson
 # Licensed under the Apache License, Version 2.0
 
+require 'puppet/parameter/boolean'
+
 # Patch sshkey type to add feature and associated param
 class Puppet::Type::Sshkey
   feature :hashed_hostnames,
           'The provider supports hashed hostnames.'
 
-  newparam(:hash_hostname, boolean: true, required_features: :hashed_hostnames) do
-    defaultto :false
+  newparam(:hash_hostname, parent: Puppet::Parameter::Boolean, boolean: true, required_features: :hashed_hostnames) do
+    defaultto false
   end
 end
 
@@ -39,6 +41,16 @@ Puppet::Type.type(:sshkey).provide(:augeas, parent: Puppet::Type.type(:augeaspro
   desc 'Uses Augeas API to update SSH known_hosts entries'
 
   has_features :hashed_hostnames
+
+  # Puppet normally generates this, but only for features declared before the
+  # type's first provider attaches, which a provider file cannot rely on.
+  def self.hashed_hostnames?
+    true
+  end
+
+  def hashed_hostnames?
+    true
+  end
 
   default_file { '/etc/ssh/ssh_known_hosts' }
 
@@ -142,7 +154,7 @@ Puppet::Type.type(:sshkey).provide(:augeas, parent: Puppet::Type.type(:augeaspro
 
   def create
     augopen! do |aug|
-      if resource[:hash_hostname] == :true
+      if resource.hash_hostname?
         [resource[:name], resource[:host_aliases]].flatten.compact.each do |h|
           create_entry(aug, h, resource[:type], resource[:key], true)
         end
