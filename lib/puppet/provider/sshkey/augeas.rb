@@ -47,6 +47,10 @@ Puppet::Type.type(:sshkey).provide(:augeas, parent: Puppet::Type.type(:augeaspro
   confine feature: :augeas
   defaultfor feature: :augeas
 
+  def title
+    "#{@property_hash[:name]}@#{@property_hash[:type]}"
+  end
+
   def self.instances
     augopen do |aug, _path|
       resources = []
