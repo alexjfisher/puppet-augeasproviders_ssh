@@ -234,6 +234,23 @@ describe provider_class do
     end
   end
 
+  context 'with multiple key types for one host' do
+    let(:tmptarget) { aug_fixture('multiple_types') }
+    let(:target) { tmptarget.path }
+
+    it 'reports a distinct title and type for each entry' do
+      allow(provider_class).to receive(:target).and_return(target)
+
+      expect(provider_class.instances.map(&:title)).to eq(
+        [
+          'dual.example.com@ssh-rsa',
+          'dual.example.com@ssh-ed25519',
+          'single.example.com@ssh-rsa',
+        ],
+      )
+    end
+  end
+
   context 'with broken file' do
     let(:tmptarget) { aug_fixture('broken') }
     let(:target) { tmptarget.path }

@@ -84,6 +84,36 @@ describe 'sshkey provider' do
         end
       end
 
+      # Purging builds its list of existing keys from the provider, so it only
+      # works if each entry reports which key type it is for. Uses the default
+      # target, because that is the file purging looks at.
+      context 'purging unmanaged entries' do
+        let(:target) { '/etc/ssh/ssh_known_hosts' }
+
+        let(:manifest) do
+          <<-EOM
+            sshkey { 'keep.example.com':
+              ensure   => present,
+              type     => 'ssh-rsa',
+              key      => 'AAAAKEEPKEY',
+              provider => 'augeas',
+            }
+            resources { 'sshkey': purge => true }
+          EOM
+        end
+
+        it 'removes the unmanaged entry and keeps the declared one' do
+          on host, "printf '%s\\n' 'keep.example.com ssh-rsa AAAAKEEPKEY' 'purge.example.com ssh-rsa AAAAPURGEKEY' > #{target}"
+          apply_manifest_on(host, manifest, catch_failures: true)
+          on host, "grep '^keep.example.com ssh-rsa AAAAKEEPKEY$' #{target}"
+          on host, "grep 'purge.example.com' #{target}", acceptable_exit_codes: [1]
+        end
+
+        it 'is idempotent' do
+          apply_manifest_on(host, manifest, catch_changes: true)
+        end
+      end
+
       # This module monkeypatches the shared sshkey type, so prove the stock
       # parsed provider still works with the module loaded
       context 'entries managed with the parsed provider' do

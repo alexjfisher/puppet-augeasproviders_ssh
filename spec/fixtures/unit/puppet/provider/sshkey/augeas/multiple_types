@@ -1,0 +1,3 @@
+dual.example.com ssh-rsa AAAA_RSA
+dual.example.com ssh-ed25519 AAAA_ED
+single.example.com ssh-rsa AAAA_SINGLE
