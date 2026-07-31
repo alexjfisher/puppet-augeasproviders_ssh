@@ -184,7 +184,7 @@ Puppet::Type.type(:sshkey).provide(:augeas, parent: Puppet::Type.type(:augeaspro
       key = aug.get('$resource/key')
 
       # Careful: create_entry redefines $resource!
-      aliases = aug.match('$resource/alias')
+      aliases = aug.match('$resource/alias').map { |apath| aug.get(apath) }
       aug.rm('$resource/alias')
 
       aliases.each do |a|

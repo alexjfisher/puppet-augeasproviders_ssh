@@ -149,6 +149,39 @@ describe 'sshkey provider' do
         end
       end
 
+      context 'converting a clear entry to hashed' do
+        let(:target) { '/etc/ssh/acceptance_known_hosts_convert' }
+
+        let(:clear_manifest) do
+          <<-EOM
+            sshkey { 'convert.example.com':
+              ensure       => present,
+              type         => 'ssh-rsa',
+              key          => 'AAAACONVERTKEY',
+              host_aliases => ['convertalias.example.com'],
+              target       => '#{target}',
+              provider     => 'augeas',
+            }
+          EOM
+        end
+
+        let(:hashed_manifest) { clear_manifest.sub('present', 'hashed') }
+
+        it 'hashes the entry and its alias' do
+          on host, "rm -f #{target}"
+          apply_manifest_on(host, clear_manifest, catch_failures: true)
+          apply_manifest_on(host, hashed_manifest, catch_failures: true)
+          expect(on(host, "grep -c '^|1|.* ssh-rsa AAAACONVERTKEY$' #{target}").stdout.to_i).to eq(2)
+          on host, "grep 'convert' #{target}", acceptable_exit_codes: [1]
+          on host, "ssh-keygen -F convert.example.com -f #{target}"
+          on host, "ssh-keygen -F convertalias.example.com -f #{target}"
+        end
+
+        it 'is idempotent' do
+          apply_manifest_on(host, hashed_manifest, catch_changes: true)
+        end
+      end
+
       # This module monkeypatches the shared sshkey type, so prove the stock
       # parsed provider still works with the module loaded
       context 'entries managed with the parsed provider' do
