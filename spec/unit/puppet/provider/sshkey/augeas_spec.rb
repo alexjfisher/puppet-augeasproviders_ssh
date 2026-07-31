@@ -251,6 +251,40 @@ describe provider_class do
     end
   end
 
+  # If another provider for this type is loaded before this module is, Puppet
+  # builds the type's feature checks without one for hashed_hostnames, and the
+  # hash_hostname parameter gets dropped. Which provider loads first varies by
+  # installation and CI happens to get the lucky order, so remove the check to
+  # reproduce the unlucky one.
+  context 'when the type has no check for the hashed_hostnames feature' do
+    around do |example|
+      mod = Puppet::Type.type(:sshkey).const_get(:FeatureModule)
+      original = mod.instance_method(:hashed_hostnames?) if mod.method_defined?(:hashed_hostnames?)
+      mod.send(:remove_method, :hashed_hostnames?) if original
+      begin
+        example.run
+      ensure
+        mod.send(:define_method, :hashed_hostnames?, original) if original
+      end
+    end
+
+    it 'still reports the feature as supported' do
+      expect(provider_class.feature?(:hashed_hostnames)).to be true
+    end
+
+    it 'keeps the hash_hostname parameter' do
+      resource = Puppet::Type.type(:sshkey).new(
+        name: 'foo.example.com',
+        type: 'ssh-rsa',
+        key: 'DEADMEAT',
+        hash_hostname: true,
+        provider: 'augeas',
+      )
+
+      expect(resource[:hash_hostname]).to be true
+    end
+  end
+
   context 'with broken file' do
     let(:tmptarget) { aug_fixture('broken') }
     let(:target) { tmptarget.path }

@@ -114,6 +114,41 @@ describe 'sshkey provider' do
         end
       end
 
+      context 'hashed entry' do
+        let(:target) { '/etc/ssh/acceptance_known_hosts_hashed' }
+
+        let(:manifest) do
+          <<-EOM
+            sshkey { 'hashed.example.com':
+              ensure        => present,
+              type          => 'ssh-rsa',
+              key           => 'AAAAHASHEDKEY',
+              hash_hostname => true,
+              target        => '#{target}',
+              provider      => 'augeas',
+            }
+          EOM
+        end
+
+        it 'creates the entry hashed' do
+          on host, "rm -f #{target}"
+          apply_manifest_on(host, manifest, catch_failures: true)
+          on host, "grep '^|1|.* ssh-rsa AAAAHASHEDKEY$' #{target}"
+          on host, "grep 'hashed.example.com' #{target}", acceptable_exit_codes: [1]
+        end
+
+        # ssh-keygen -F recomputes the HMAC from the entry's salt, so it only
+        # finds the entry if the hash really is of this hostname
+        it 'creates a hash that ssh resolves to the hostname' do
+          on host, "ssh-keygen -F hashed.example.com -f #{target}"
+          on host, "ssh-keygen -F other.example.com -f #{target}", acceptable_exit_codes: [1]
+        end
+
+        it 'is idempotent' do
+          apply_manifest_on(host, manifest, catch_changes: true)
+        end
+      end
+
       # This module monkeypatches the shared sshkey type, so prove the stock
       # parsed provider still works with the module loaded
       context 'entries managed with the parsed provider' do
